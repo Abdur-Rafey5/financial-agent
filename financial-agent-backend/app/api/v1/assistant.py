@@ -146,7 +146,8 @@ async def chat_with_assistant(payload: ChatMessageRequest, user: CurrentUser, db
     db.add(user_msg)
 
     # Gather user context summary
-    user_cat = user.category.value if hasattr(user.category, "value") else str(user.category)
+    category_obj = user.profile.category if user.profile else None
+    user_cat = category_obj.value if hasattr(category_obj, "value") else str(category_obj or "employee").lower()
     context_str = f"Category: {user_cat}, Email: {user.email}"
 
     # Generate assistant reply

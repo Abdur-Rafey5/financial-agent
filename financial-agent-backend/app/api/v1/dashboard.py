@@ -115,7 +115,8 @@ async def get_dashboard_summary(user: CurrentUser, db: DbSession):
     active_budgets_count = budgets_res.scalar_one()
 
     # Category-specific extra metrics
-    user_cat = user.category.value if hasattr(user.category, "value") else str(user.category)
+    category_obj = user.profile.category if user.profile else None
+    user_cat = category_obj.value if hasattr(category_obj, "value") else str(category_obj or "employee").lower()
     category_metrics: Dict[str, Any] = {}
 
     if user_cat == "student":
