@@ -1,0 +1,27 @@
+# Ignore other unrelated scratch projects
+abdur-rafey-portfolio/
+highway-geometry/
+spec.txt
+
+# Python / Backend
+financial-agent-backend/venv/
+financial-agent-backend/__pycache__/
+financial-agent-backend/*/__pycache__/
+financial-agent-backend/*/*/__pycache__/
+financial-agent-backend/*.db
+financial-agent-backend/*.db-journal
+financial-agent-backend/*.db-wal
+financial-agent-backend/*.db-shm
+financial-agent-backend/.env
+financial-agent-backend/.pytest_cache/
+
+# Node / Frontend
+financial-agent-frontend/node_modules/
+financial-agent-frontend/.next/
+financial-agent-frontend/.env.local
+financial-agent-frontend/.env*.local
+financial-agent-frontend/npm-debug.log*
+
+# System
+.DS_Store
+Thumbs.db
