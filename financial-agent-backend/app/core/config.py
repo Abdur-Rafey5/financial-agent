@@ -36,12 +36,19 @@ class Settings(BaseSettings):
 
     # ── Google Gemini ────────────────────────────────────────────────
     GEMINI_API_KEY: str = ""
+    GEMINI_MODEL: str = "gemini-2.5-flash"
+    GEMINI_TIMEOUT_SECONDS: float = 30.0
 
     # ── Alpha Vantage ────────────────────────────────────────────────
     ALPHA_VANTAGE_API_KEY: str = ""
+    MARKET_DATA_CACHE_TTL_SECONDS: int = 900  # 15 minutes
+
+    # ── Seeding ──────────────────────────────────────────────────────
+    SEED_DEFAULT_CATEGORIES: bool = True
+    SEED_DEMO_DATA: bool = False
 
     # ── CORS ─────────────────────────────────────────────────────────
-    CORS_ORIGINS: str = "http://localhost:3000"
+    CORS_ORIGINS: str = "http://localhost:3000,http://localhost:8080"
 
     @property
     def cors_origins_list(self) -> List[str]:

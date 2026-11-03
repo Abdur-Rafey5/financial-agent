@@ -1,31 +1,30 @@
-# Core
-fastapi==0.115.4
-uvicorn[standard]==0.32.0
-pydantic==2.9.2
-pydantic-settings==2.6.1
-python-multipart==0.0.12
+# Core web framework
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.30,<1.0
+pydantic>=2.9,<3.0
+pydantic-settings>=2.6,<3.0
+python-multipart>=0.0.12
+email-validator>=2.2
 
-# Database
-sqlalchemy==2.0.36
-alembic==1.14.0
-psycopg2-binary==2.9.10
-asyncpg==0.30.0
+# Database (PostgreSQL in production, SQLite for local development/tests)
+sqlalchemy>=2.0.36,<3.0
+greenlet>=3.0
+alembic>=1.14,<2.0
+asyncpg>=0.30
+psycopg2-binary>=2.9.10
+aiosqlite>=0.20
 
 # Authentication
-python-jose[cryptography]==3.3.0
-argon2-cffi==23.1.0
+python-jose[cryptography]>=3.3
+argon2-cffi>=23.1
 
-# AI
-google-genai==1.14.0
-
-# Market Data
-httpx==0.28.0
-
-# Testing
-pytest==8.3.3
-pytest-asyncio==0.24.0
-pytest-cov==6.0.0
-httpx==0.28.0
+# Market data (Gemini is called over REST with httpx)
+httpx>=0.28,<1.0
 
 # Utilities
-python-dateutil==2.9.0
+python-dateutil>=2.9
+
+# Testing
+pytest>=8.3
+pytest-asyncio>=0.24
+pytest-cov>=6.0
