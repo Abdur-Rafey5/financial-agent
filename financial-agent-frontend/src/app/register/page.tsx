@@ -1,10 +1,11 @@
 "use client";
 
-import { useState } from "react";
+import { useState, type FormEvent } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Bot, Lock, Mail, User, ArrowRight, AlertCircle } from "lucide-react";
-import { apiFetch, setStoredToken } from "@/lib/api";
+import { AlertCircle, ArrowRight, Bot, Lock, Mail, User } from "lucide-react";
+import { authApi, setStoredToken, setStoredUser } from "@/lib/api";
+import { Button, Card, Field, Input } from "@/components/ui";
 
 export default function RegisterPage() {
   const router = useRouter();
@@ -14,104 +15,101 @@ export default function RegisterPage() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
     setError(null);
+
+    if (password.length < 8) {
+      setError("Password must be at least 8 characters long.");
+      return;
+    }
+
     setLoading(true);
-
     try {
-      const res = await apiFetch<{ access_token: string; token_type: string }>("/auth/register", {
-        method: "POST",
-        body: JSON.stringify({ full_name: fullName, email, password }),
-      });
-
+      const res = await authApi.register({ full_name: fullName, email, password });
       setStoredToken(res.access_token);
+      setStoredUser(res.user);
       router.push("/onboarding");
-    } catch (err: any) {
-      setError(err.message || "Failed to create account. Please check your details.");
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Failed to create account. Please check your details."
+      );
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center px-4 relative">
-      <div className="w-full max-w-md glass-panel p-8 rounded-2xl relative z-10">
-        <div className="flex flex-col items-center text-center mb-8">
-          <div className="w-12 h-12 rounded-xl bg-gradient-to-tr from-indigo-500 to-emerald-400 flex items-center justify-center shadow-lg shadow-indigo-500/20 mb-4">
-            <Bot className="w-7 h-7 text-white" />
-          </div>
-          <h2 className="text-2xl font-bold text-white tracking-tight">Create Your Account</h2>
-          <p className="text-sm text-slate-400 mt-1">Start intelligent financial management today</p>
+    <div className="relative flex min-h-screen items-center justify-center px-4">
+      <div className="pointer-events-none absolute -top-32 left-1/3 h-80 w-80 rounded-full bg-emerald-600/15 blur-3xl" />
+
+      <Card className="relative z-10 w-full max-w-md p-8">
+        <div className="mb-8 flex flex-col items-center text-center">
+          <span className="mb-4 flex h-12 w-12 items-center justify-center rounded-xl bg-gradient-to-tr from-indigo-500 to-emerald-400 shadow-lg shadow-indigo-500/20">
+            <Bot className="h-7 w-7 text-white" />
+          </span>
+          <h1 className="text-2xl font-bold tracking-tight text-white">Create your account</h1>
+          <p className="mt-1 text-sm text-slate-400">Start intelligent financial management today</p>
         </div>
 
         {error && (
-          <div className="mb-6 p-3.5 rounded-xl bg-red-500/10 border border-red-500/20 flex items-center gap-3 text-red-400 text-sm">
-            <AlertCircle className="w-5 h-5 flex-shrink-0" />
+          <div className="mb-6 flex items-center gap-3 rounded-xl border border-red-500/20 bg-red-500/10 px-4 py-3 text-sm text-red-300">
+            <AlertCircle className="h-5 w-5 flex-shrink-0" />
             <span>{error}</span>
           </div>
         )}
 
         <form onSubmit={handleSubmit} className="space-y-4">
-          <div>
-            <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-2">
-              Full Name
-            </label>
+          <Field label="Full name">
             <div className="relative">
-              <User className="w-5 h-5 absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
-              <input
+              <User className="pointer-events-none absolute left-3.5 top-1/2 h-5 w-5 -translate-y-1/2 text-slate-500" />
+              <Input
                 type="text"
                 required
+                autoComplete="name"
                 value={fullName}
                 onChange={(e) => setFullName(e.target.value)}
-                placeholder="Muhammad Ali"
-                className="w-full pl-11 pr-4 py-3 rounded-xl bg-slate-900/60 border border-slate-700/80 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none text-white text-sm placeholder:text-slate-500 transition-all"
+                placeholder="Ayesha Khan"
+                className="pl-11"
               />
             </div>
-          </div>
+          </Field>
 
-          <div>
-            <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-2">
-              Email Address
-            </label>
+          <Field label="Email address">
             <div className="relative">
-              <Mail className="w-5 h-5 absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
-              <input
+              <Mail className="pointer-events-none absolute left-3.5 top-1/2 h-5 w-5 -translate-y-1/2 text-slate-500" />
+              <Input
                 type="email"
                 required
+                autoComplete="email"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 placeholder="name@example.com"
-                className="w-full pl-11 pr-4 py-3 rounded-xl bg-slate-900/60 border border-slate-700/80 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none text-white text-sm placeholder:text-slate-500 transition-all"
+                className="pl-11"
               />
             </div>
-          </div>
+          </Field>
 
-          <div>
-            <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-2">
-              Password
-            </label>
+          <Field label="Password" hint="Use at least 8 characters.">
             <div className="relative">
-              <Lock className="w-5 h-5 absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
-              <input
+              <Lock className="pointer-events-none absolute left-3.5 top-1/2 h-5 w-5 -translate-y-1/2 text-slate-500" />
+              <Input
                 type="password"
                 required
                 minLength={8}
+                autoComplete="new-password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 placeholder="Min 8 characters"
-                className="w-full pl-11 pr-4 py-3 rounded-xl bg-slate-900/60 border border-slate-700/80 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none text-white text-sm placeholder:text-slate-500 transition-all"
+                className="pl-11"
               />
             </div>
-          </div>
+          </Field>
 
-          <button
-            type="submit"
-            disabled={loading}
-            className="w-full py-3.5 px-4 rounded-xl font-semibold bg-indigo-600 hover:bg-indigo-500 text-white shadow-lg shadow-indigo-600/30 flex items-center justify-center gap-2 transition-all disabled:opacity-50 mt-2"
-          >
-            {loading ? "Registering..." : "Create Account"} <ArrowRight className="w-4 h-4" />
-          </button>
+          <Button type="submit" size="lg" loading={loading} className="mt-2 w-full">
+            {!loading && <ArrowRight className="h-4 w-4" />}
+            Create account
+          </Button>
         </form>
 
         <p className="mt-8 text-center text-sm text-slate-400">
@@ -120,7 +118,7 @@ export default function RegisterPage() {
             Sign in
           </Link>
         </p>
-      </div>
+      </Card>
     </div>
   );
 }

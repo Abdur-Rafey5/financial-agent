@@ -3,9 +3,10 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { GraduationCap, Users, Building2, Check, ArrowRight, Sparkles } from "lucide-react";
-import { apiFetch } from "@/lib/api";
+import { businessApi, usersApi } from "@/lib/api";
+import type { Category } from "@/lib/types";
 
-type CategoryType = "student" | "employee" | "businessman";
+type CategoryType = Category;
 
 export default function OnboardingPage() {
   const router = useRouter();
@@ -27,7 +28,14 @@ export default function OnboardingPage() {
     setError(null);
 
     try {
-      const payload: any = {
+      const payload: {
+        category: Category;
+        currency: string;
+        allowance_amount?: number;
+        allowance_frequency?: string;
+        monthly_salary?: number;
+        employer_name?: string;
+      } = {
         category: selectedCategory,
         currency: "PKR",
       };
@@ -40,27 +48,21 @@ export default function OnboardingPage() {
         payload.employer_name = employerName;
       }
 
-      await apiFetch("/users/onboarding", {
-        method: "POST",
-        body: JSON.stringify(payload),
-      });
+      await usersApi.onboarding(payload);
 
       // If businessman, also register business profile
       if (selectedCategory === "businessman" && businessName) {
-        await apiFetch("/business/profile", {
-          method: "POST",
-          body: JSON.stringify({
-            business_name: businessName,
-            business_type: businessType,
-            available_capital: parseFloat(availableCapital) || 0,
-            currency: "PKR",
-          }),
+        await businessApi.upsertProfile({
+          business_name: businessName,
+          business_type: businessType,
+          available_capital: parseFloat(availableCapital) || 0,
+          currency: "PKR",
         });
       }
 
       router.push("/dashboard");
-    } catch (err: any) {
-      setError(err.message || "Failed to complete onboarding.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to complete onboarding.");
     } finally {
       setLoading(false);
     }
