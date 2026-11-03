@@ -1,139 +1,227 @@
 """
-Investments and market data API via Alpha Vantage adapter.
+Investments and market-data API.
+
+All quotes come from Alpha Vantage through :mod:`app.services.market_data`.
+When the provider is not configured, or rate-limits the request, the response
+says so explicitly. Prices are never fabricated or extrapolated.
 """
 
-from typing import List, Dict, Any, Optional
+from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel
-import httpx
+from fastapi import APIRouter, HTTPException, Query, status
+from pydantic import BaseModel, Field
 
 from app.api.dependencies import CurrentUser, DbSession
 from app.core.config import settings
-from app.models.business import MarketDataSnapshot
+from app.services import market_data
 
 router = APIRouter()
 
 
-class StockQuote(BaseModel):
+# ── Schemas ──────────────────────────────────────────────────────────────
+class QuoteData(BaseModel):
     symbol: str
     price: float
-    change: float
-    change_percent: str
-    high: float
-    low: float
-    volume: int
-    latest_trading_day: str
-    source: str = "Alpha Vantage (Simulated / Real-time)"
+    change: Optional[float] = None
+    change_percent: Optional[float] = None
+    open: Optional[float] = None
+    high: Optional[float] = None
+    low: Optional[float] = None
+    previous_close: Optional[float] = None
+    volume: Optional[int] = None
+    latest_trading_day: Optional[str] = None
 
 
-class StockSearchResult(BaseModel):
+class QuoteEnvelope(BaseModel):
+    available: bool
     symbol: str
-    name: str
-    type: str
-    region: str
-    currency: str
+    provider: str = market_data.PROVIDER
+    source: str = market_data.PROVIDER
+    fetched_at: Optional[str] = None
+    cached: bool = False
+    reason: Optional[str] = None
+    quote: Optional[QuoteData] = None
 
 
-# Demo sample fallback quotes for offline / keyless testing
-DEMO_QUOTES = {
-    "AAPL": {
-        "symbol": "AAPL",
-        "price": 235.80,
-        "change": 2.45,
-        "change_percent": "+1.05%",
-        "high": 236.40,
-        "low": 233.10,
-        "volume": 48201200,
-        "latest_trading_day": "2026-10-30",
-    },
-    "MSFT": {
-        "symbol": "MSFT",
-        "price": 448.20,
-        "change": -1.15,
-        "change_percent": "-0.26%",
-        "high": 451.00,
-        "low": 446.50,
-        "volume": 21390400,
-        "latest_trading_day": "2026-10-30",
-    },
-    "GOOGL": {
-        "symbol": "GOOGL",
-        "price": 182.50,
-        "change": 3.20,
-        "change_percent": "+1.78%",
-        "high": 183.10,
-        "low": 179.90,
-        "volume": 29810100,
-        "latest_trading_day": "2026-10-30",
-    },
-    "NVDA": {
-        "symbol": "NVDA",
-        "price": 142.10,
-        "change": 4.60,
-        "change_percent": "+3.35%",
-        "high": 143.20,
-        "low": 138.80,
-        "volume": 68420000,
-        "latest_trading_day": "2026-10-30",
-    },
-}
+class WatchlistItem(BaseModel):
+    symbol: str
+    available: bool
+    reason: Optional[str] = None
+    quote: Optional[QuoteData] = None
+    fetched_at: Optional[str] = None
+    cached: bool = False
 
 
-@router.get("/quotes/{symbol}", response_model=StockQuote)
-async def get_stock_quote(symbol: str, user: CurrentUser, db: DbSession):
-    """Fetch real-time stock quote from Alpha Vantage with fallback demo data."""
-    sym = symbol.upper().strip()
+class WatchlistResponse(BaseModel):
+    provider: str = market_data.PROVIDER
+    configured: bool
+    items: List[WatchlistItem]
 
-    # If Alpha Vantage API key is configured and not default dummy
-    if hasattr(settings, "ALPHA_VANTAGE_API_KEY") and settings.ALPHA_VANTAGE_API_KEY and settings.ALPHA_VANTAGE_API_KEY != "demo":
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.get(
-                    "https://www.alphavantage.co/query",
-                    params={
-                        "function": "GLOBAL_QUOTE",
-                        "symbol": sym,
-                        "apikey": settings.ALPHA_VANTAGE_API_KEY,
-                    },
-                )
-                if resp.status_code == 200:
-                    data = resp.json().get("Global Quote", {})
-                    if data and "05. price" in data:
-                        return StockQuote(
-                            symbol=sym,
-                            price=float(data.get("05. price", 0)),
-                            change=float(data.get("09. change", 0)),
-                            change_percent=data.get("10. change percent", "0%"),
-                            high=float(data.get("03. high", 0)),
-                            low=float(data.get("04. low", 0)),
-                            volume=int(data.get("06. volume", 0)),
-                            latest_trading_day=data.get("07. latest trading day", ""),
-                            source="Alpha Vantage Live",
-                        )
-        except Exception:
-            pass
 
-    # Fallback to demo curated stocks
-    if sym in DEMO_QUOTES:
-        d = DEMO_QUOTES[sym]
-        return StockQuote(**d, source="Demo Market Feed (US Stocks)")
+class SearchResult(BaseModel):
+    symbol: str
+    name: Optional[str] = None
+    type: Optional[str] = None
+    region: Optional[str] = None
+    currency: Optional[str] = None
 
-    # Generic realistic fallback for any US stock requested
-    return StockQuote(
-        symbol=sym,
-        price=150.00,
-        change=1.25,
-        change_percent="+0.84%",
-        high=152.00,
-        low=148.50,
-        volume=15000000,
-        latest_trading_day="2026-10-30",
-        source="Estimated Demo Feed",
+
+class SearchResponse(BaseModel):
+    available: bool
+    provider: str = market_data.PROVIDER
+    reason: Optional[str] = None
+    results: List[SearchResult] = Field(default_factory=list)
+
+
+class MarketStatusResponse(BaseModel):
+    configured: bool
+    provider: str = market_data.PROVIDER
+    cache_ttl_seconds: int
+    watchlist_symbols: List[str]
+    message: str
+
+
+def _quote_model(payload: dict) -> QuoteData:
+    return QuoteData(
+        symbol=payload.get("symbol", ""),
+        price=payload.get("price", 0.0),
+        change=payload.get("change"),
+        change_percent=payload.get("change_percent"),
+        open=payload.get("open"),
+        high=payload.get("high"),
+        low=payload.get("low"),
+        previous_close=payload.get("previous_close"),
+        volume=payload.get("volume"),
+        latest_trading_day=payload.get("latest_trading_day"),
     )
 
 
-@router.get("/watchlist", response_model=List[StockQuote])
-async def get_watchlist(user: CurrentUser):
-    """Get curated watchlist of prominent stocks for easy tracking."""
-    return [StockQuote(**d, source="Demo Market Feed (US Stocks)") for d in DEMO_QUOTES.values()]
+# ── Routes ───────────────────────────────────────────────────────────────
+@router.get("/status", response_model=MarketStatusResponse)
+async def market_status(user: CurrentUser):
+    """Report whether live market data is configured (no secrets revealed)."""
+    configured = market_data.is_configured()
+    return MarketStatusResponse(
+        configured=configured,
+        cache_ttl_seconds=settings.MARKET_DATA_CACHE_TTL_SECONDS,
+        watchlist_symbols=market_data.DEFAULT_WATCHLIST,
+        message=(
+            "Live quotes enabled via Alpha Vantage."
+            if configured
+            else "No market-data API key configured. Quotes are unavailable rather than simulated."
+        ),
+    )
+
+
+@router.get("/quotes/{symbol}", response_model=QuoteEnvelope)
+async def get_stock_quote(
+    symbol: str,
+    user: CurrentUser,
+    db: DbSession,
+    force_refresh: bool = Query(False),
+):
+    """
+    Fetch one quote.
+
+    Returns ``available=false`` with a reason when the provider cannot supply
+    data. It never returns an invented price.
+    """
+    try:
+        normalized = market_data.normalize_symbol(symbol)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Invalid ticker symbol",
+        )
+
+    try:
+        payload = await market_data.get_quote(db, normalized, force_refresh=force_refresh)
+    except market_data.MarketDataError as exc:
+        return QuoteEnvelope(
+            available=False, symbol=normalized, reason=str(exc)
+        )
+
+    if payload is None:
+        return QuoteEnvelope(
+            available=False,
+            symbol=normalized,
+            reason="Market data provider is not configured (set ALPHA_VANTAGE_API_KEY).",
+        )
+
+    return QuoteEnvelope(
+        available=True,
+        symbol=payload.get("symbol") or normalized,
+        provider=payload.get("source", market_data.PROVIDER),
+        source=payload.get("source", market_data.PROVIDER),
+        fetched_at=payload.get("fetched_at"),
+        cached=bool(payload.get("cached")),
+        quote=_quote_model(payload),
+    )
+
+
+@router.get("/watchlist", response_model=WatchlistResponse)
+async def get_watchlist(user: CurrentUser, db: DbSession):
+    """Fetch the curated watchlist, marking each symbol's availability."""
+    configured = market_data.is_configured()
+    items: List[WatchlistItem] = []
+
+    for symbol in market_data.DEFAULT_WATCHLIST:
+        if not configured:
+            items.append(
+                WatchlistItem(
+                    symbol=symbol,
+                    available=False,
+                    reason="Market data provider is not configured.",
+                )
+            )
+            continue
+        try:
+            payload = await market_data.get_quote(db, symbol)
+        except market_data.MarketDataError as exc:
+            items.append(
+                WatchlistItem(symbol=symbol, available=False, reason=str(exc))
+            )
+            continue
+        if payload is None:
+            items.append(
+                WatchlistItem(
+                    symbol=symbol,
+                    available=False,
+                    reason="Quote unavailable.",
+                )
+            )
+            continue
+        items.append(
+            WatchlistItem(
+                symbol=payload.get("symbol") or symbol,
+                available=True,
+                quote=_quote_model(payload),
+                fetched_at=payload.get("fetched_at"),
+                cached=bool(payload.get("cached")),
+            )
+        )
+
+    return WatchlistResponse(configured=configured, items=items)
+
+
+@router.get("/search", response_model=SearchResponse)
+async def search_symbols(
+    user: CurrentUser,
+    db: DbSession,
+    q: str = Query(..., min_length=1, max_length=40),
+):
+    """Search ticker symbols. Returns an empty list when unconfigured."""
+    if not market_data.is_configured():
+        return SearchResponse(
+            available=False,
+            reason="Market data provider is not configured.",
+        )
+    try:
+        matches = await market_data.search_symbols(db, q)
+    except market_data.MarketDataError as exc:
+        return SearchResponse(available=False, reason=str(exc))
+
+    return SearchResponse(
+        available=True,
+        results=[SearchResult(**match) for match in matches],
+    )

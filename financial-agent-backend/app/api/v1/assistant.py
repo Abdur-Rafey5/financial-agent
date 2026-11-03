@@ -1,28 +1,31 @@
 """
-AI Conversational Assistant API — Gemini-powered financial advisor.
+Conversational assistant API.
+
+The assistant is grounded in a deterministic financial snapshot. Gemini only
+turns those facts into prose; if it is unavailable the endpoint returns a
+factual backend-generated summary instead of inventing an answer.
 """
 
 import uuid
-from typing import List, Optional, Dict, Any
+from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel, Field
-from sqlalchemy import select, and_
+from sqlalchemy import and_, select
 from sqlalchemy.orm import selectinload
 
 from app.api.dependencies import CurrentUser, DbSession
-from app.core.config import settings
 from app.models.ai import AIConversation, AIMessage, MessageRole
-from app.models.income import IncomeRecord
-from app.models.expense import ExpenseRecord
-from app.models.budget import Budget
-from app.models.goal import FinancialGoal
+from app.services import gemini
+from app.services.financial_context import build_financial_context, context_to_prompt
 
 router = APIRouter()
 
+HISTORY_LIMIT = 10
+
 
 class ChatMessageRequest(BaseModel):
-    message: str = Field(min_length=1)
+    message: str = Field(min_length=1, max_length=4000)
     conversation_id: Optional[str] = None
 
 
@@ -36,6 +39,17 @@ class MessageItem(BaseModel):
 class ChatResponse(BaseModel):
     conversation_id: str
     message: MessageItem
+    ai_generated: bool
+    context_period: str
+
+
+class ConversationSummary(BaseModel):
+    id: str
+    title: Optional[str] = None
+    message_count: int
+    last_message: Optional[str] = None
+    created_at: str
+    updated_at: str
 
 
 class ConversationDetailResponse(BaseModel):
@@ -43,160 +57,153 @@ class ConversationDetailResponse(BaseModel):
     title: Optional[str] = None
     messages: List[MessageItem]
     created_at: str
+    updated_at: str
 
 
-async def _generate_gemini_response(user_category: str, prompt: str, user_context_str: str) -> str:
-    """Call Google Gemini API if key is available, or use intelligent category-specific rules."""
-    api_key = getattr(settings, "GEMINI_API_KEY", "")
-    if api_key and api_key != "your-gemini-api-key-here":
-        try:
-            import httpx
+async def _load_conversation(
+    conversation_id: str, user_id: uuid.UUID, db
+) -> AIConversation:
+    try:
+        cid = uuid.UUID(conversation_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Conversation not found")
 
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
-            system_instruction = (
-                f"You are an expert AI Financial Advisor specializing in assisting {user_category.upper()} users. "
-                "Provide precise, actionable financial wisdom, encouraging discipline, clear budgeting, and wealth creation. "
-                f"User financial snapshot:\n{user_context_str}\n"
-                "Keep answers crisp, encouraging, structured with bullet points where appropriate."
-            )
+    conversation = await db.scalar(
+        select(AIConversation)
+        .options(selectinload(AIConversation.messages))
+        .where(and_(AIConversation.id == cid, AIConversation.user_id == user_id))
+    )
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return conversation
 
-            payload = {
-                "contents": [
-                    {
-                        "parts": [
-                            {"text": f"{system_instruction}\n\nUser Question: {prompt}"}
-                        ]
-                    }
-                ]
-            }
 
-            async with httpx.AsyncClient(timeout=20.0) as client:
-                res = await client.post(url, json=payload)
-                if res.status_code == 200:
-                    data = res.json()
-                    candidates = data.get("candidates", [])
-                    if candidates:
-                        text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
-                        if text:
-                            return text
-        except Exception:
-            pass
-
-    # High-quality fallback response generator
-    cat_lower = user_category.lower()
-    if cat_lower == "student":
-        return (
-            f"🎓 **Student Financial Guidance:**\n\n"
-            f"Based on your query: *\"{prompt}\"*:\n\n"
-            f"1. **Protect your essential buffer**: Keep at least 20-30% of your allowance for emergencies before spending on social activities.\n"
-            f"2. **Daily Spending Limit**: Divide your disposable pocket money by the days left in the month to avoid running out early.\n"
-            f"3. **Micro-Savings**: Even saving Rs. 100-500 weekly compounds good financial habits early.\n\n"
-            f"Let me know if you would like me to adjust your budget allocations!"
-        )
-    elif cat_lower == "businessman":
-        return (
-            f"💼 **Business Financial Analysis:**\n\n"
-            f"Regarding your inquiry: *\"{prompt}\"*:\n\n"
-            f"1. **Working Capital Protection**: Maintain at least 3 to 6 months of fixed operational expenses in highly liquid accounts.\n"
-            f"2. **Gross Margin vs Cash Flow**: Profitable sales that take 60+ days to collect can still strangle cash flow. Monitor your cash conversion cycle.\n"
-            f"3. **ROI Stress Testing**: Before expanding or acquiring inventory, test scenarios under a 15% revenue downturn.\n\n"
-            f"Would you like to model a what-if scenario in the Business module?"
-        )
-    else:  # employee
-        return (
-            f"💼 **Personal Wealth Strategy (Employee):**\n\n"
-            f"Reviewing your question: *\"{prompt}\"*:\n\n"
-            f"1. **50/30/20 Rule**: Direct 50% of your net salary toward needs, 30% to wants, and automate 20% into savings or long-term investments.\n"
-            f"2. **Emergency Cushion**: Target 3-6 months of living expenses saved in high-yield or safe liquid funds.\n"
-            f"3. **Milestone Tracking**: Prioritize funding active goals before increasing lifestyle expenses.\n\n"
-            f"Shall we review your current month's budget limits?"
-        )
+def _message_item(message: AIMessage) -> MessageItem:
+    return MessageItem(
+        id=str(message.id),
+        role=message.role.value if hasattr(message.role, "value") else str(message.role),
+        content=message.content,
+        created_at=message.created_at.isoformat(),
+    )
 
 
 @router.post("/chat", response_model=ChatResponse)
-async def chat_with_assistant(payload: ChatMessageRequest, user: CurrentUser, db: DbSession):
-    """Interact with the financial assistant."""
-    conv: Optional[AIConversation] = None
+async def chat_with_assistant(
+    payload: ChatMessageRequest, user: CurrentUser, db: DbSession
+):
+    """Send a message to the grounded financial assistant."""
+    conversation: Optional[AIConversation] = None
+    history: List[dict[str, str]] = []
     if payload.conversation_id:
-        try:
-            cid = uuid.UUID(payload.conversation_id)
-            res = await db.execute(
-                select(AIConversation).where(
-                    and_(AIConversation.id == cid, AIConversation.user_id == user.id)
-                )
-            )
-            conv = res.scalar_one_or_none()
-        except ValueError:
-            pass
+        conversation = await _load_conversation(payload.conversation_id, user.id, db)
+        history = [
+            {
+                "role": message.role.value
+                if hasattr(message.role, "value")
+                else str(message.role),
+                "content": message.content,
+            }
+            for message in conversation.messages[-HISTORY_LIMIT:]
+            if message.role != MessageRole.SYSTEM
+        ]
 
-    if not conv:
-        conv = AIConversation(
+    if conversation is None:
+        conversation = AIConversation(
             user_id=user.id,
-            title=payload.message[:50],
+            title=payload.message.strip()[:60] or "New conversation",
         )
-        db.add(conv)
+        db.add(conversation)
         await db.flush()
 
-    # Save user message
-    user_msg = AIMessage(
-        conversation_id=conv.id,
-        role=MessageRole.USER,
-        content=payload.message,
+    db.add(
+        AIMessage(
+            conversation_id=conversation.id,
+            role=MessageRole.USER,
+            content=payload.message.strip(),
+        )
     )
-    db.add(user_msg)
 
-    # Gather user context summary
-    category_obj = user.profile.category if user.profile else None
-    user_cat = category_obj.value if hasattr(category_obj, "value") else str(category_obj or "employee").lower()
-    context_str = f"Category: {user_cat}, Email: {user.email}"
+    context = await build_financial_context(db, user)
+    context_block = context_to_prompt(context)
+    currency = context["user"]["currency"]
+    user_category = context["user"]["category"]
 
-    # Generate assistant reply
-    assistant_reply_text = await _generate_gemini_response(user_cat, payload.message, context_str)
+    ai_generated = False
+    try:
+        reply = await gemini.generate_reply(
+            system_prompt=gemini.build_system_prompt(context_block, currency),
+            message=payload.message.strip(),
+            history=history,
+        )
+        ai_generated = True
+    except gemini.GeminiUnavailable:
+        reply = gemini.fallback_reply(payload.message, context_block)
 
-    assistant_msg = AIMessage(
-        conversation_id=conv.id,
+    assistant_message = AIMessage(
+        conversation_id=conversation.id,
         role=MessageRole.ASSISTANT,
-        content=assistant_reply_text,
+        content=reply,
     )
-    db.add(assistant_msg)
+    db.add(assistant_message)
     await db.commit()
-    await db.refresh(assistant_msg)
+    await db.refresh(assistant_message)
 
     return ChatResponse(
-        conversation_id=str(conv.id),
-        message=MessageItem(
-            id=str(assistant_msg.id),
-            role="assistant",
-            content=assistant_msg.content,
-            created_at=assistant_msg.created_at.isoformat(),
-        ),
+        conversation_id=str(conversation.id),
+        message=_message_item(assistant_message),
+        ai_generated=ai_generated,
+        context_period=f"{context['period']['month_start']} to {context['period']['month_end']}",
     )
 
 
-@router.get("/conversations", response_model=List[ConversationDetailResponse])
-async def list_conversations(user: CurrentUser, db: DbSession):
-    """List previous AI assistant conversations."""
-    res = await db.execute(
+@router.get("/conversations", response_model=List[ConversationSummary])
+async def list_conversations(
+    user: CurrentUser,
+    db: DbSession,
+    limit: int = Query(20, ge=1, le=100),
+):
+    """List previous assistant conversations (newest first)."""
+    result = await db.execute(
         select(AIConversation)
         .options(selectinload(AIConversation.messages))
         .where(AIConversation.user_id == user.id)
-        .order_by(AIConversation.created_at.desc())
+        .order_by(AIConversation.updated_at.desc())
+        .limit(limit)
     )
-    conversations = res.scalars().all()
+    conversations = result.scalars().all()
     return [
-        ConversationDetailResponse(
-            id=str(c.id),
-            title=c.title,
-            messages=[
-                MessageItem(
-                    id=str(m.id),
-                    role=m.role.value if hasattr(m.role, "value") else str(m.role),
-                    content=m.content,
-                    created_at=m.created_at.isoformat(),
-                )
-                for m in c.messages
-            ],
-            created_at=c.created_at.isoformat(),
+        ConversationSummary(
+            id=str(conversation.id),
+            title=conversation.title,
+            message_count=len(conversation.messages),
+            last_message=conversation.messages[-1].content[:140]
+            if conversation.messages
+            else None,
+            created_at=conversation.created_at.isoformat(),
+            updated_at=conversation.updated_at.isoformat(),
         )
-        for c in conversations
+        for conversation in conversations
     ]
+
+
+@router.get("/conversations/{conversation_id}", response_model=ConversationDetailResponse)
+async def get_conversation(conversation_id: str, user: CurrentUser, db: DbSession):
+    """Get a conversation with its full message history."""
+    conversation = await _load_conversation(conversation_id, user.id, db)
+    return ConversationDetailResponse(
+        id=str(conversation.id),
+        title=conversation.title,
+        messages=[_message_item(message) for message in conversation.messages],
+        created_at=conversation.created_at.isoformat(),
+        updated_at=conversation.updated_at.isoformat(),
+    )
+
+
+@router.delete(
+    "/conversations/{conversation_id}", status_code=status.HTTP_204_NO_CONTENT
+)
+async def delete_conversation(conversation_id: str, user: CurrentUser, db: DbSession):
+    """Delete a conversation and all of its messages."""
+    conversation = await _load_conversation(conversation_id, user.id, db)
+    await db.delete(conversation)
+    await db.commit()
