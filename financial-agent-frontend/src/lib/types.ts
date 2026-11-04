@@ -439,6 +439,28 @@ export interface MarketStatus {
   message: string;
 }
 
+export interface InsightItem {
+  symbol: string;
+  name: string;
+  price: number;
+  currency?: string | null;
+  day_change_percent?: number | null;
+  window_change_percent?: number | null;
+  window_days?: number | null;
+  volume?: number | null;
+  latest_trading_day?: string | null;
+}
+
+export interface InsightsResponse {
+  available: boolean;
+  provider: string;
+  ai_generated: boolean;
+  content: string;
+  data: InsightItem[];
+  generated_at?: string | null;
+  reason?: string | null;
+}
+
 // ── Business ──────────────────────────────────────────────────────────
 export interface BusinessProfile {
   id: string;

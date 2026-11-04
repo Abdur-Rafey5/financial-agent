@@ -19,6 +19,7 @@ import type {
   IncomeCategory,
   IncomeRecord,
   MarketStatus,
+  InsightsResponse,
   OnboardingPayload,
   Recommendation,
   RecommendationList,
@@ -343,6 +344,7 @@ export const investmentsApi = {
       `/investments/quotes/${encodeURIComponent(symbol)}${qs({ force_refresh: force || undefined })}`
     ),
   watchlist: () => apiFetch<WatchlistResponse>("/investments/watchlist"),
+  insights: () => apiFetch<InsightsResponse>("/investments/insights"),
   search: (query: string) =>
     apiFetch<SearchResponse>(`/investments/search${qs({ q: query })}`),
 };

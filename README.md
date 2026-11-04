@@ -65,6 +65,14 @@ Next.js 16 (App Router)  ──REST / JWT──▶  FastAPI  ──SQLAlchemy (a
   unavailable. Optionally (`MARKET_KEYLESS_FALLBACK=true`), a keyless **Yahoo Finance**
   source provides live quotes and symbol search without any registration; the active
   provider is surfaced in every response and in `/health`.
+- **Watchlist** covers tech (AAPL, MSFT, GOOGL, TSLA, NVDA, AMZN), consumer staples
+  (KO, PEP), **gold** (`GC=F`, COMEX front-month futures) and the **S&P 500** (`^GSPC`).
+- **AI investment insights** (`GET /investments/insights`): Gemini comments per watchlist
+  symbol on what the fetched **5-session trend** could mean ("can lead to a benefit if /
+  risk if falls below X") — grounded strictly in quote numbers the backend already fetched,
+  never news or invented data, ends with an explicit "not investment advice" line. When
+  Gemini is unavailable the endpoint serves a deterministic trend summary instead
+  (`ai_generated=false`).
 
 ### Determinism principle
 

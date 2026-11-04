@@ -14,7 +14,8 @@ from pydantic import BaseModel, Field
 
 from app.api.dependencies import CurrentUser, DbSession
 from app.core.config import settings
-from app.services import market_data
+from app.services import gemini, market_data
+from datetime import datetime, timezone
 
 router = APIRouter()
 
@@ -80,6 +81,36 @@ class MarketStatusResponse(BaseModel):
     cache_ttl_seconds: int
     watchlist_symbols: List[str]
     message: str
+
+
+# ── AI watchlist insights ────────────────────────────────────────────────
+# Short human labels for non-company symbols.
+_WATCHLIST_NAMES = {
+    "GC=F": "COMEX gold futures (front month)",
+    "^GSPC": "S&P 500 index",
+}
+
+
+class InsightItem(BaseModel):
+    symbol: str
+    name: str
+    price: float
+    currency: Optional[str] = None
+    day_change_percent: Optional[float] = None
+    window_change_percent: Optional[float] = None
+    window_days: Optional[int] = None
+    volume: Optional[int] = None
+    latest_trading_day: Optional[str] = None
+
+
+class InsightsResponse(BaseModel):
+    available: bool
+    provider: str = Field(default_factory=lambda: market_data.active_provider())
+    ai_generated: bool = False
+    content: str = ""
+    data: List[InsightItem] = Field(default_factory=list)
+    generated_at: Optional[str] = None
+    reason: Optional[str] = None
 
 
 def _quote_model(payload: dict) -> QuoteData:
@@ -234,4 +265,116 @@ async def search_symbols(
     return SearchResponse(
         available=True,
         results=[SearchResult(**match) for match in matches],
+    )
+
+
+def _insight_item(payload: dict) -> InsightItem:
+    history = payload.get("history") or []
+    return InsightItem(
+        symbol=payload.get("symbol", ""),
+        name=_WATCHLIST_NAMES.get(payload.get("symbol", ""), payload.get("symbol", "")),
+        price=payload.get("price", 0.0),
+        currency=payload.get("currency"),
+        day_change_percent=payload.get("change_percent"),
+        window_change_percent=payload.get("window_change_percent"),
+        window_days=len(history) if history else None,
+        volume=payload.get("volume") or None,
+        latest_trading_day=payload.get("latest_trading_day"),
+    )
+
+
+def _deterministic_insights(items: List[InsightItem]) -> str:
+    """Grounded, backend-computed trend summary (no model, no inventions)."""
+    lines = []
+    for item in items:
+        parts: List[str] = [f"-> {item.symbol}: price {item.price}"]
+        if item.currency:
+            parts.append(f"{item.currency}")
+        if item.day_change_percent is not None:
+            parts.append(f"{item.day_change_percent:+.2f}% today")
+        if (
+            item.window_change_percent is not None
+            and item.window_days
+            and item.window_days >= 2
+        ):
+            parts.append(f"{item.window_change_percent:+.2f}% over {item.window_days} sessions")
+        lines.append(" — ".join(parts) + ".")
+    body = "\n".join(lines) if lines else "No fresh quotes are cached yet."
+    return (
+        "The AI model is unavailable right now, so here is a direct, "
+        "computed trend summary instead:\n\n" + body + "\n\n"
+        "Informational only - not investment advice."
+    )
+
+
+@router.get("/insights", response_model=InsightsResponse)
+async def investment_insights(user: CurrentUser, db: DbSession):
+    """
+    Short per-symbol commentary for the default watchlist.
+
+    The commentary is grounded: the model may only reference quote numbers
+    that the backend fetched and displays. When Gemini is unavailable the
+    endpoint falls back to a deterministic trend summary and flags it with
+    ``ai_generated=false``.
+    """
+    if market_data.active_provider() == "none":
+        return InsightsResponse(
+            available=False, reason="Market data provider is not configured."
+        )
+
+    items: List[InsightItem] = []
+    for symbol in market_data.DEFAULT_WATCHLIST:
+        try:
+            payload = await market_data.get_quote(db, symbol)
+        except market_data.MarketDataError:
+            continue
+        if payload:
+            items.append(_insight_item(payload))
+
+    if not items:
+        return InsightsResponse(
+            available=False,
+            reason="No fresh quotes are cached yet — press Refresh all first.",
+        )
+
+    data_block = "\n".join(
+        f"{i.symbol} | {i.name} | price {i.price} {i.currency or ''}".rstrip()
+        + (
+            f" | latest day {i.day_change_percent:+.2f}%"
+            if i.day_change_percent is not None
+            else ""
+        )
+        + (
+            f" | {i.window_change_percent:+.2f}% over {i.window_days} sessions"
+            if i.window_change_percent is not None and i.window_days
+            else ""
+        )
+        + (
+            f" | volume {i.volume}"
+            if i.volume
+            else ""
+        )
+        for i in items
+    )
+
+    try:
+        content = await gemini.generate_reply(
+            system_prompt=gemini.build_insights_prompt(data_block),
+            message=(
+                "Write the watchlist commentary exactly as instructed: one "
+                "grounded line per symbol, then the single warning line."
+            ),
+            temperature=0.3,
+        )
+        ai_generated = True
+    except gemini.GeminiUnavailable:
+        content = _deterministic_insights(items)
+        ai_generated = False
+
+    return InsightsResponse(
+        available=True,
+        ai_generated=ai_generated,
+        content=content,
+        data=items,
+        generated_at=datetime.now(timezone.utc).isoformat(),
     )

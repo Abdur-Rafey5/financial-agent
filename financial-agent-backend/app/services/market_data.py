@@ -29,11 +29,22 @@ _BASE_URL = "https://www.alphavantage.co/query"
 _YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
 _YAHOO_SEARCH_URL = "https://query1.finance.yahoo.com/v1/finance/search"
 _YAHOO_HEADERS = {"User-Agent": "Mozilla/5.0 FinAgent/1.0"}
-_SYMBOL_RE = re.compile(r"^[A-Za-z0-9.\-]{1,20}$")
+_SYMBOL_RE = re.compile(r"^[A-Za-z0-9.\-^=]{1,20}$")
 
 # Small curated list used only for the default watchlist *symbols*.
 # No prices are attached to these.
-DEFAULT_WATCHLIST = ["AAPL", "MSFT", "GOOGL", "TSLA", "NVDA"]
+DEFAULT_WATCHLIST = [
+    "AAPL",
+    "MSFT",
+    "GOOGL",
+    "TSLA",
+    "NVDA",
+    "KO",  # Coca-Cola
+    "PEP",  # PepsiCo
+    "AMZN",
+    "GC=F",  # COMEX gold futures (front-month)
+    "^GSPC",  # S&P 500 index
+]
 
 
 class MarketDataError(RuntimeError):
@@ -229,6 +240,23 @@ def _parse_yahoo_chart(payload: dict[str, Any]) -> dict[str, Any]:
     # Derive the previous close from the daily closes in window.
     indicators = ((result.get("indicators") or {}).get("quote") or [{}])[0]
     closes = [c for c in (indicators.get("close") or []) if c is not None]
+    timestamps = result.get("timestamp") or []
+
+    # Daily close history (aligned timestamp + close pairs); feeds the
+    # deterministic trend calculations and the grounded AI insights.
+    history = []
+    for ts, close in zip(timestamps, indicators.get("close") or []):
+        if ts is None or close is None:
+            continue
+        history.append(
+            {
+                "date": datetime.fromtimestamp(ts, tz=timezone.utc)
+                .date()
+                .isoformat(),
+                "close": round(close, 2),
+            }
+        )
+
     previous_close = (
         _to_float(closes[-2])
         if len(closes) >= 2
@@ -241,7 +269,14 @@ def _parse_yahoo_chart(payload: dict[str, Any]) -> dict[str, Any]:
         change = round(price - previous_close, 2)
         change_percent = round(change / previous_close * 100, 2)
 
-    timestamps = result.get("timestamp") or []
+    # Change across the whole fetched window (first vs last daily close).
+    window_start = history[0]["close"] if history else None
+    window_change_percent = None
+    if window_start and len(history) >= 2 and window_start != 0:
+        window_change_percent = round(
+            (history[-1]["close"] - window_start) / window_start * 100, 2
+        )
+
     trading_day: Optional[str] = None
     if timestamps:
         trading_day = datetime.fromtimestamp(
@@ -260,6 +295,9 @@ def _parse_yahoo_chart(payload: dict[str, Any]) -> dict[str, Any]:
         "latest_trading_day": trading_day,
         "previous_close": previous_close,
         "currency": meta.get("currency"),
+        "history": history,
+        "window_start": window_start,
+        "window_change_percent": window_change_percent,
     }
 
 

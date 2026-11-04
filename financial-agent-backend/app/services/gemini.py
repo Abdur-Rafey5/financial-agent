@@ -136,3 +136,23 @@ def fallback_reply(question: str, context_block: str) -> str:
         "These figures are facts from your recorded data. "
         "Add a Gemini API key to receive conversational guidance about them."
     )
+
+
+def build_insights_prompt(data_block: str) -> str:
+    """System prompt for grounded per-symbol market commentary."""
+    return (
+        "You are the market-commentary module of a personal finance app.\n"
+        "Rules you must never break:\n"
+        "1. Use ONLY the MARKET DATA block for numbers. Never invent prices, "
+        "percentages, history points or dates that are not printed there.\n"
+        "2. Do not invent or reference news, events, earnings or macro reasons; "
+        "you have not been given any such context.\n"
+        "3. One short line (max ~30 words) per symbol, based strictly on the "
+        "given recent-trend numbers: what the trend shows and what it could "
+        "mean for someone considering buying — e.g. 'this can lead to a "
+        "benefit if ...' followed by an 'if it falls below X there is a risk ...'.\n"
+        "4. These are educational observations only; never promise returns.\n"
+        "5. End with exactly: 'Informational only - not investment advice.'\n"
+        "6. Plain text, one '->' bullet per symbol.\n\n"
+        f"MARKET DATA\n{data_block}"
+    )

@@ -5,6 +5,7 @@ from datetime import date
 from conftest import bearer, register_user
 
 from app.core.config import settings
+from app.services import gemini, market_data
 from app.services.business_rules import simulate_scenario
 
 
@@ -55,6 +56,67 @@ async def test_status_reports_keyless_fallback_when_enabled(client, monkeypatch)
     assert body["configured"] is False
     assert body["provider"] == "Yahoo Finance"
     assert "Yahoo Finance" in body["message"]
+
+
+async def test_extended_market_symbols_are_accepted():
+    """Index and futures tickers (^GSPC, GC=F) must pass validation."""
+    assert market_data.normalize_symbol("GC=F") == "GC=F"
+    assert market_data.normalize_symbol("^GSPC") == "^GSPC"
+
+
+async def test_insights_unavailable_when_no_provider(client, monkeypatch):
+    monkeypatch.setattr(settings, "ALPHA_VANTAGE_API_KEY", "")
+    monkeypatch.setattr(settings, "MARKET_KEYLESS_FALLBACK", False)
+    token = await register_user(client, email="insights-off@example.com")
+    response = await client.get(
+        "/api/v1/investments/insights", headers=bearer(token)
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["available"] is False
+    assert "not configured" in (body["reason"] or "")
+
+
+async def test_insights_fall_back_to_deterministic_trends(client, monkeypatch):
+    """When Gemini is down, insights are computed from stored quote numbers."""
+    monkeypatch.setattr(settings, "ALPHA_VANTAGE_API_KEY", "")
+    monkeypatch.setattr(settings, "MARKET_KEYLESS_FALLBACK", True)
+
+    fake_quote = {
+        "symbol": "AAPL",
+        "price": 100.0,
+        "currency": "USD",
+        "change_percent": 1.5,
+        "window_change_percent": 4.17,
+        "history": [
+            {"date": "2026-11-03", "close": 96.0},
+            {"date": "2026-11-04", "close": 100.0},
+        ],
+        "volume": 1234,
+        "latest_trading_day": "2026-11-04",
+    }
+
+    async def fake_get_quote(db, symbol, force_refresh=False):
+        return dict(fake_quote)
+
+    async def unavailable(**kwargs):
+        raise gemini.GeminiUnavailable("unreachable")
+
+    monkeypatch.setattr(market_data, "get_quote", fake_get_quote)
+    monkeypatch.setattr(gemini, "generate_reply", unavailable)
+
+    token = await register_user(client, email="insights-fallback@example.com")
+    response = await client.get(
+        "/api/v1/investments/insights", headers=bearer(token)
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["available"] is True
+    assert body["ai_generated"] is False
+    assert "computed trend summary" in body["content"]
+    assert "Informational only - not investment advice." in body["content"]
+    assert body["data"][0]["symbol"] == "AAPL"
+    assert body["data"][0]["window_change_percent"] == 4.17
 
 
 async def test_invalid_symbol_is_rejected(client):
