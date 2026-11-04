@@ -62,7 +62,9 @@ Next.js 16 (App Router)  ──REST / JWT──▶  FastAPI  ──SQLAlchemy (a
 - **Market data** from an **Alpha Vantage** adapter, cached in the database with a TTL.
   Every response carries the provider name and the timestamp of the underlying data, and
   **prices are never fabricated** — when no API key is configured, quotes are reported as
-  unavailable.
+  unavailable. Optionally (`MARKET_KEYLESS_FALLBACK=true`), a keyless **Yahoo Finance**
+  source provides live quotes and symbol search without any registration; the active
+  provider is surfaced in every response and in `/health`.
 
 ### Determinism principle
 
@@ -108,6 +110,7 @@ The API is served at `http://localhost:8000`, interactive docs at
 | `JWT_SECRET_KEY` | Secret used to sign JWT access tokens. |
 | `GEMINI_API_KEY` | Google Gemini key. Leave empty for the deterministic fallback. |
 | `ALPHA_VANTAGE_API_KEY` | Market data key. Leave empty to report quotes as unavailable. |
+| `MARKET_KEYLESS_FALLBACK` | When `true` and no Alpha Vantage key is set, quotes/search use Yahoo Finance's public keyless endpoints (15-min cache). Default `false` so tests stay hermetic/offline. |
 | `CORS_ORIGINS` | Comma-separated allowed origins (default `http://localhost:3000,http://localhost:8080`). |
 | `SEED_DEFAULT_CATEGORIES` | Seed the system category catalogue on startup (default `true`). |
 | `SEED_DEMO_DATA` | Create the demo account on startup (default `false`; Docker sets it to `true`). |
