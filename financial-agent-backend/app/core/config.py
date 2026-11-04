@@ -42,6 +42,10 @@ class Settings(BaseSettings):
     # ── Alpha Vantage ────────────────────────────────────────────────
     ALPHA_VANTAGE_API_KEY: str = ""
     MARKET_DATA_CACHE_TTL_SECONDS: int = 900  # 15 minutes
+    # When no Alpha Vantage key is set, optionally fall back to Yahoo
+    # Finance's public quote endpoints (no key required). Default off so
+    # tests stay hermetic; enable in development or self-hosted deployments.
+    MARKET_KEYLESS_FALLBACK: bool = False
 
     # ── Seeding ──────────────────────────────────────────────────────
     SEED_DEFAULT_CATEGORIES: bool = True

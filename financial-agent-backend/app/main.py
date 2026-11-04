@@ -16,6 +16,7 @@ from sqlalchemy import text
 
 from app.core.config import settings
 from app.core.exceptions import AppException
+from app.services import market_data
 
 logger = logging.getLogger(__name__)
 
@@ -162,9 +163,8 @@ def create_app() -> FastAPI:
                 "version": settings.APP_VERSION,
                 "database": "ok" if database_ok else "unreachable",
                 "ai_configured": bool(settings.GEMINI_API_KEY.strip()),
-                "market_data_configured": bool(
-                    settings.ALPHA_VANTAGE_API_KEY.strip()
-                ),
+                "market_data_configured": market_data.active_provider() != "none",
+                "market_data_provider": market_data.active_provider(),
             },
         )
 

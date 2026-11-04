@@ -24,7 +24,11 @@ from app.models.business import MarketDataSnapshot
 logger = logging.getLogger(__name__)
 
 PROVIDER = "Alpha Vantage"
+_KEYLESS_PROVIDER = "Yahoo Finance"
 _BASE_URL = "https://www.alphavantage.co/query"
+_YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+_YAHOO_SEARCH_URL = "https://query1.finance.yahoo.com/v1/finance/search"
+_YAHOO_HEADERS = {"User-Agent": "Mozilla/5.0 FinAgent/1.0"}
 _SYMBOL_RE = re.compile(r"^[A-Za-z0-9.\-]{1,20}$")
 
 # Small curated list used only for the default watchlist *symbols*.
@@ -40,6 +44,15 @@ def is_configured() -> bool:
     return bool(settings.ALPHA_VANTAGE_API_KEY.strip())
 
 
+def active_provider() -> str:
+    """Name of the provider currently in use (surfaced without revealing keys)."""
+    if is_configured():
+        return PROVIDER
+    if settings.MARKET_KEYLESS_FALLBACK:
+        return _KEYLESS_PROVIDER
+    return "none"
+
+
 def normalize_symbol(symbol: str) -> str:
     symbol = (symbol or "").strip().upper()
     if not _SYMBOL_RE.match(symbol):
@@ -52,6 +65,8 @@ async def _cached(
     symbol: str,
     data_type: str,
     ttl_seconds: int,
+    *,
+    provider: str = PROVIDER,
 ) -> Optional[dict[str, Any]]:
     cutoff = datetime.now(timezone.utc) - timedelta(seconds=ttl_seconds)
     snapshot = await db.scalar(
@@ -59,7 +74,7 @@ async def _cached(
         .where(
             MarketDataSnapshot.symbol == symbol,
             MarketDataSnapshot.data_type == data_type,
-            MarketDataSnapshot.provider == PROVIDER,
+            MarketDataSnapshot.provider == provider,
             MarketDataSnapshot.created_at >= cutoff,
         )
         .order_by(MarketDataSnapshot.created_at.desc())
@@ -80,11 +95,13 @@ async def _store(
     data_type: str,
     data: dict[str, Any],
     source_timestamp: Optional[datetime] = None,
+    *,
+    provider: str = PROVIDER,
 ) -> None:
     db.add(
         MarketDataSnapshot(
             symbol=symbol,
-            provider=PROVIDER,
+            provider=provider,
             data_type=data_type,
             data=data,
             source_timestamp=source_timestamp,
@@ -163,6 +180,8 @@ async def get_quote(
             return _envelope(symbol, cached["data"], cached["fetched_at"], cached=False)
 
     if not is_configured():
+        if settings.MARKET_KEYLESS_FALLBACK:
+            return await _keyless_quote(db, symbol)
         return None
 
     payload = await _call_provider({"function": "GLOBAL_QUOTE", "symbol": symbol})
@@ -180,6 +199,118 @@ async def get_quote(
 
     await _store(db, symbol, "quote", data, source_timestamp)
     return _envelope(symbol, data, datetime.now(timezone.utc), cached=False)
+
+
+# ── Keyless Yahoo Finance fallback ──────────────────────────────────
+async def _call_yahoo(path: str, params: dict[str, str]) -> dict[str, Any]:
+    try:
+        async with httpx.AsyncClient(timeout=15.0, headers=_YAHOO_HEADERS) as client:
+            response = await client.get(path, params=params)
+    except httpx.HTTPError as exc:
+        raise MarketDataError("Market data provider unreachable") from exc
+    if response.status_code >= 400:
+        raise MarketDataError(f"Provider returned HTTP {response.status_code}")
+    try:
+        return response.json()
+    except ValueError as exc:
+        raise MarketDataError("Provider returned a non-JSON response") from exc
+
+
+def _parse_yahoo_chart(payload: dict[str, Any]) -> dict[str, Any]:
+    result = ((payload.get("chart") or {}).get("result") or [None])[0]
+    if result is None:
+        raise MarketDataError("No quote available for this symbol")
+    meta = result.get("meta") or {}
+
+    price = _to_float(meta.get("regularMarketPrice"))
+    if price is None:
+        raise MarketDataError("No quote available for this symbol")
+
+    # Derive the previous close from the daily closes in window.
+    indicators = ((result.get("indicators") or {}).get("quote") or [{}])[0]
+    closes = [c for c in (indicators.get("close") or []) if c is not None]
+    previous_close = (
+        _to_float(closes[-2])
+        if len(closes) >= 2
+        else _to_float(meta.get("chartPreviousClose"))
+    )
+
+    change = None
+    change_percent = None
+    if previous_close is not None and previous_close != 0:
+        change = round(price - previous_close, 2)
+        change_percent = round(change / previous_close * 100, 2)
+
+    timestamps = result.get("timestamp") or []
+    trading_day: Optional[str] = None
+    if timestamps:
+        trading_day = datetime.fromtimestamp(
+            timestamps[-1], tz=timezone.utc
+        ).date().isoformat()
+
+    return {
+        "symbol": meta.get("symbol"),
+        "price": round(price, 2),
+        "change": change,
+        "change_percent": change_percent,
+        "open": _to_float((indicators.get("open") or [None])[-1]),
+        "high": _to_float(meta.get("regularMarketDayHigh")),
+        "low": _to_float(meta.get("regularMarketDayLow")),
+        "volume": int(meta.get("regularMarketVolume") or 0),
+        "latest_trading_day": trading_day,
+        "previous_close": previous_close,
+        "currency": meta.get("currency"),
+    }
+
+
+async def _keyless_quote(db: AsyncSession, symbol: str) -> dict[str, Any]:
+    """Fetch one quote from Yahoo Finance (no API key)."""
+    payload = await _call_yahoo(
+        _YAHOO_CHART_URL.format(symbol=symbol),
+        params={"range": "5d", "interval": "1d"},
+    )
+    data = _parse_yahoo_chart(payload)
+
+    source_timestamp = None
+    if data.get("latest_trading_day"):
+        try:
+            source_timestamp = datetime.fromisoformat(
+                data["latest_trading_day"]
+            ).replace(tzinfo=timezone.utc)
+        except ValueError:
+            source_timestamp = None
+
+    await _store(
+        db, symbol, "quote", data, source_timestamp, provider=_KEYLESS_PROVIDER
+    )
+    return {
+        **data,
+        "source": _KEYLESS_PROVIDER,
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+        "cached": False,
+    }
+
+
+async def _keyless_search(query: str) -> list[dict[str, Any]]:
+    """Symbol search via Yahoo Finance (no API key)."""
+    payload = await _call_yahoo(
+        _YAHOO_SEARCH_URL,
+        params={"q": query, "quotesCount": 10},
+    )
+    matches = []
+    for item in (payload.get("quotes") or [])[:10]:
+        if not item.get("symbol"):
+            continue
+        matches.append(
+            {
+                "symbol": item.get("symbol"),
+                "name": item.get("shortname") or item.get("longname"),
+                "type": item.get("quoteType"),
+                "region": item.get("exchDisp") or item.get("exchange"),
+                "currency": item.get("currency"),
+            }
+        )
+    return matches
 
 
 def _envelope(
@@ -208,11 +339,22 @@ async def search_symbols(
         return []
 
     cache_key = f"SEARCH:{query.upper()[:40]}"
-    cached = await _cached(db, cache_key, "search", 86_400)
+    cached = await _cached(db, cache_key, "search", 86_400, provider=active_provider())
     if cached:
         return list(cached["data"].get("matches", []))
 
     if not is_configured():
+        if settings.MARKET_KEYLESS_FALLBACK:
+            matches = await _keyless_search(query)
+            await _store(
+                db,
+                cache_key,
+                "search",
+                {"matches": matches},
+                datetime.now(timezone.utc),
+                provider=_KEYLESS_PROVIDER,
+            )
+            return matches
         return []
 
     payload = await _call_provider({"function": "SYMBOL_SEARCH", "keywords": query})

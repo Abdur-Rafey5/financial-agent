@@ -1,9 +1,10 @@
 """
 Investments and market-data API.
 
-All quotes come from Alpha Vantage through :mod:`app.services.market_data`.
-When the provider is not configured, or rate-limits the request, the response
-says so explicitly. Prices are never fabricated or extrapolated.
+Quotes come from Alpha Vantage through :mod:`app.services.market_data`, with an
+optional keyless Yahoo Finance fallback (``MARKET_KEYLESS_FALLBACK=true``).
+When no provider is available, or the provider fails or rate-limits the
+request, the response says so explicitly. Prices are never fabricated.
 """
 
 from typing import List, Optional
@@ -35,8 +36,8 @@ class QuoteData(BaseModel):
 class QuoteEnvelope(BaseModel):
     available: bool
     symbol: str
-    provider: str = market_data.PROVIDER
-    source: str = market_data.PROVIDER
+    provider: str = Field(default_factory=lambda: market_data.active_provider())
+    source: str = Field(default_factory=lambda: market_data.active_provider())
     fetched_at: Optional[str] = None
     cached: bool = False
     reason: Optional[str] = None
@@ -53,7 +54,7 @@ class WatchlistItem(BaseModel):
 
 
 class WatchlistResponse(BaseModel):
-    provider: str = market_data.PROVIDER
+    provider: str = Field(default_factory=lambda: market_data.active_provider())
     configured: bool
     items: List[WatchlistItem]
 
@@ -68,14 +69,14 @@ class SearchResult(BaseModel):
 
 class SearchResponse(BaseModel):
     available: bool
-    provider: str = market_data.PROVIDER
+    provider: str = Field(default_factory=lambda: market_data.active_provider())
     reason: Optional[str] = None
     results: List[SearchResult] = Field(default_factory=list)
 
 
 class MarketStatusResponse(BaseModel):
     configured: bool
-    provider: str = market_data.PROVIDER
+    provider: str = Field(default_factory=lambda: market_data.active_provider())
     cache_ttl_seconds: int
     watchlist_symbols: List[str]
     message: str
@@ -99,17 +100,26 @@ def _quote_model(payload: dict) -> QuoteData:
 # ── Routes ───────────────────────────────────────────────────────────────
 @router.get("/status", response_model=MarketStatusResponse)
 async def market_status(user: CurrentUser):
-    """Report whether live market data is configured (no secrets revealed)."""
+    """Report which market-data source is active (no secrets revealed)."""
     configured = market_data.is_configured()
+    if configured:
+        message = "Live quotes enabled via Alpha Vantage."
+    elif market_data.active_provider() != "none":
+        message = (
+            "No Alpha Vantage key configured — quoting from Yahoo Finance "
+            "(keyless source, 15-minute cache). Add ALPHA_VANTAGE_API_KEY for "
+            "higher reliability."
+        )
+    else:
+        message = (
+            "No market-data API key configured. Quotes are unavailable rather "
+            "than simulated."
+        )
     return MarketStatusResponse(
         configured=configured,
         cache_ttl_seconds=settings.MARKET_DATA_CACHE_TTL_SECONDS,
         watchlist_symbols=market_data.DEFAULT_WATCHLIST,
-        message=(
-            "Live quotes enabled via Alpha Vantage."
-            if configured
-            else "No market-data API key configured. Quotes are unavailable rather than simulated."
-        ),
+        message=message,
     )
 
 
@@ -162,11 +172,11 @@ async def get_stock_quote(
 @router.get("/watchlist", response_model=WatchlistResponse)
 async def get_watchlist(user: CurrentUser, db: DbSession):
     """Fetch the curated watchlist, marking each symbol's availability."""
-    configured = market_data.is_configured()
+    provider = market_data.active_provider()
     items: List[WatchlistItem] = []
 
     for symbol in market_data.DEFAULT_WATCHLIST:
-        if not configured:
+        if provider == "none":
             items.append(
                 WatchlistItem(
                     symbol=symbol,
@@ -201,7 +211,7 @@ async def get_watchlist(user: CurrentUser, db: DbSession):
             )
         )
 
-    return WatchlistResponse(configured=configured, items=items)
+    return WatchlistResponse(configured=provider != "none", items=items)
 
 
 @router.get("/search", response_model=SearchResponse)
@@ -211,7 +221,7 @@ async def search_symbols(
     q: str = Query(..., min_length=1, max_length=40),
 ):
     """Search ticker symbols. Returns an empty list when unconfigured."""
-    if not market_data.is_configured():
+    if market_data.active_provider() == "none":
         return SearchResponse(
             available=False,
             reason="Market data provider is not configured.",

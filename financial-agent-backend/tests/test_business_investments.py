@@ -14,6 +14,9 @@ def today() -> str:
 
 async def test_investments_are_honest_when_unconfigured(client, monkeypatch):
     monkeypatch.setattr(settings, "ALPHA_VANTAGE_API_KEY", "")
+    # Hermetic: the developer .env may enable the keyless Yahoo fallback,
+    # but this test must never touch the network.
+    monkeypatch.setattr(settings, "MARKET_KEYLESS_FALLBACK", False)
     token = await register_user(client, email="invest@example.com")
     headers = bearer(token)
 
@@ -37,6 +40,21 @@ async def test_investments_are_honest_when_unconfigured(client, monkeypatch):
     )
     assert search.json()["available"] is False
     assert search.json()["results"] == []
+
+
+async def test_status_reports_keyless_fallback_when_enabled(client, monkeypatch):
+    """With the fallback flag on, status advertises Yahoo Finance (no network)."""
+    monkeypatch.setattr(settings, "ALPHA_VANTAGE_API_KEY", "")
+    monkeypatch.setattr(settings, "MARKET_KEYLESS_FALLBACK", True)
+    token = await register_user(client, email="fallback@example.com")
+    headers = bearer(token)
+
+    status = await client.get("/api/v1/investments/status", headers=headers)
+    assert status.status_code == 200
+    body = status.json()
+    assert body["configured"] is False
+    assert body["provider"] == "Yahoo Finance"
+    assert "Yahoo Finance" in body["message"]
 
 
 async def test_invalid_symbol_is_rejected(client):

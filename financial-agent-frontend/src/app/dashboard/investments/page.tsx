@@ -145,7 +145,7 @@ export default function InvestmentsPage() {
       <Card className="mb-6">
         <CardHeader
           title="Look up a quote"
-          subtitle="Enter a ticker symbol, e.g. AAPL or MSFT — data comes from Alpha Vantage."
+          subtitle="Enter a ticker symbol, e.g. AAPL or MSFT — quotes come from the active market-data provider."
         />
         <div className="flex gap-2">
           <Input
